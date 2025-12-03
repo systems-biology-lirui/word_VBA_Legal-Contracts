@@ -1,0 +1,193 @@
+这是一个word的宏，现在我不在旁边批注了，你能否直接使用修订模式，使用ai对于原文本的内容进行修改
+Sub AI_Full_Document_Review()
+    ' ==========================================
+    ' Word 2021 进阶版：全文 AI 扫描 + 自动定位批注
+    ' ==========================================
+    
+    Dim apiKey As String
+    ' ?????? 请在此处填入您的 API Key ??????
+    apiKey = "————————————————"
+    
+    Dim docContent As String
+    ' 获取文档全文内容
+    docContent = ActiveDocument.Content.Text
+    ' 简单清理一下多余的控制符，防止 JSON 报错
+    docContent = CleanString(docContent)
+    
+    If Len(docContent) < 10 Then
+        MsgBox "文档内容太少，无需分析。", vbExclamation
+        Exit Sub
+    End If
+    
+    ' 定义 API URL
+    Dim url As String
+    url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent?key=" & apiKey
+    
+    ' ==========================================
+    ' 核心 Prompt 设计：强制 AI 输出特定格式以便机器读取
+    ' 格式约定：每一条风险用 {RISK} 分隔，原文和分析用 | 分隔
+    ' 例如： {RISK}原文句子|分析内容{RISK}原文句子2|分析内容2
+    ' ==========================================
+    Dim prompt As String
+    prompt = "你是专业的中国法务。请审查整份合同，找出对买方/甲方不利的法律风险点。" & _
+             "【绝对严格的输出格式要求】：" & _
+             "不要输出任何开场白或总结。请直接列出风险点。" & _
+             "每一条风险必须严格按照此格式输出：{RISK}原文中的具体条款句子|完整修改建议" & _
+             "注意：'原文中的具体条款句子'必须与合同内容一字不差，以便我进行搜索定位。" & _
+             "分析意见请简练（50字以内）。。" & _
+             "待审查合同内容：" & docContent
+    
+    ' 构建 JSON
+    Dim jsonBody As String
+    jsonBody = "{""contents"": [{""parts"": [{""text"": """ & EscapeJson(prompt) & """}]}]}"
+    
+    ' 发送请求
+    Dim http As Object
+    Set http = CreateObject("MSXML2.XMLHTTP")
+    
+    On Error GoTo ErrorHandler
+    
+    Application.StatusBar = "?? AI 正在阅读全文，这可能需要几十秒..."
+    http.Open "POST", url, False
+    http.setRequestHeader "Content-Type", "application/json"
+    http.send jsonBody
+    
+    If http.Status = 200 Then
+        Dim responseText As String
+        responseText = http.responseText
+        
+        ' 提取 AI 回复的核心文本
+        Dim aiRawText As String
+        aiRawText = ExtractContent(responseText)
+        
+        If aiRawText = "" Then
+            MsgBox "AI 没有返回有效结果。", vbInformation
+            Exit Sub
+        End If
+        
+        ' ==========================================
+        ' 解析 AI 回复并在文档中“寻宝”
+        ' ==========================================
+        Dim riskArray() As String
+        ' 使用自定义的分隔符 {RISK} 切割字符串
+        riskArray = Split(aiRawText, "{RISK}")
+        
+        Dim i As Integer
+        Dim parts() As String
+        Dim quoteText As String
+        Dim commentText As String
+        Dim count As Integer
+        count = 0
+        
+        Application.ScreenUpdating = False ' 关闭屏幕刷新加快速度
+        
+        For i = 1 To UBound(riskArray) ' 从 1 开始，因为第一个 split 可能是空的
+            ' 分割 原文 | 分析
+            parts = Split(riskArray(i), "|")
+            
+            If UBound(parts) >= 1 Then
+                quoteText = Trim(parts(0))
+                commentText = Trim(parts(1))
+                
+                ' 在文档中查找这段原文
+                If Len(quoteText) > 5 Then ' 太短的词不找，防止误伤
+                    Call FindAndComment(quoteText, commentText)
+                    count = count + 1
+                End If
+            End If
+        Next i
+        
+        Application.ScreenUpdating = True
+        Application.StatusBar = "? 审查完成！"
+        MsgBox "审查完成！共添加了 " & count & " 处风险批注。", vbInformation
+        
+    Else
+        MsgBox "API 请求失败: " & http.Status, vbCritical
+    End If
+    
+    Set http = Nothing
+    Exit Sub
+
+ErrorHandler:
+    Application.ScreenUpdating = True
+    MsgBox "运行出错: " & Err.Description, vbCritical
+End Sub
+
+' ==========================================
+' 辅助过程：查找文本并添加批注
+' ==========================================
+Sub FindAndComment(txt As String, comment As String)
+    Dim rng As Range
+    Set rng = ActiveDocument.Content
+    
+    ' 配置查找参数
+    With rng.Find
+        .ClearFormatting
+        .Text = txt
+        .Forward = True
+        .Wrap = wdFindStop ' 找到一个就停，或者你可以改成 wdFindContinue
+        .Format = False
+        .MatchCase = False
+        .MatchWholeWord = False
+    End With
+    
+    ' 执行查找
+    If rng.Find.Execute Then
+        ' 如果找到了，rng 现在就指向找到的文字
+        ' 检查该位置是否已经有批注（避免重复打）
+        If rng.Comments.count = 0 Then
+            rng.Comments.Add Range:=rng, Text:=comment
+        End If
+    End If
+End Sub
+
+' ==========================================
+' 下面是之前的辅助函数（Json处理），保持不变
+' ==========================================
+Function EscapeJson(ByVal txt As String) As String
+    txt = Replace(txt, "\", "\\")
+    txt = Replace(txt, """", "\""")
+    txt = Replace(txt, vbCr, "\n")
+    txt = Replace(txt, vbLf, "\n")
+    txt = Replace(txt, vbTab, "\t")
+    EscapeJson = txt
+End Function
+
+Function ExtractContent(json As String) As String
+    ' 简单的暴力提取，只提取 "text": " 之后的内容
+    Dim startKey As String
+    startKey = """text"": """
+    
+    Dim startPos As Long
+    startPos = InStr(json, startKey)
+    
+    If startPos > 0 Then
+        startPos = startPos + Len(startKey)
+        Dim i As Long
+        Dim char As String
+        Dim result As String
+        result = ""
+        
+        For i = startPos To Len(json)
+            char = Mid(json, i, 1)
+            If char = """" Then
+                If Mid(json, i - 1, 1) <> "\" Then Exit For
+            End If
+            result = result & char
+        Next i
+        
+        result = Replace(result, "\n", vbCrLf)
+        result = Replace(result, "\""", """")
+        ExtractContent = result
+    Else
+        ExtractContent = ""
+    End If
+End Function
+
+Function CleanString(str As String) As String
+    CleanString = Replace(str, vbCr, " ")
+    CleanString = Replace(CleanString, vbLf, " ")
+    CleanString = Replace(CleanString, Chr(11), " ")
+    CleanString = Replace(CleanString, vbTab, " ")
+    CleanString = Trim(CleanString)
+End Function

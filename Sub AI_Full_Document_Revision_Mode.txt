@@ -1,0 +1,184 @@
+Sub AI_Full_Document_Revision_Mode()' ==========================================' Word 2021 进阶版：全文 AI 扫描 + 自动修订模式 (Track Changes)' 功能：AI 直接修改原文，保留修订痕迹，而非添加批注' ==========================================Dim apiKey As String
+' ?????? 请在此处填入您的 API Key ??????
+apiKey = "——————————————"
+
+Dim docContent As String
+' 获取文档全文内容
+docContent = ActiveDocument.Content.Text
+' 清理文档内容，移除可能破坏 JSON 的特殊字符
+docContent = CleanString(docContent)
+
+If Len(docContent) < 10 Then
+    MsgBox "文档内容太少，无需分析。", vbExclamation
+    Exit Sub
+End If
+
+' 定义 API URL
+Dim url As String
+url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent?key=" & apiKey
+
+' ==========================================
+' 核心 Prompt
+' ==========================================
+Dim prompt As String
+prompt = "你是专业的中国法务专家。请审查这份合同，直接修改对买方/甲方不利、模糊或有风险的条款。" & _
+         "【绝对严格的输出格式要求】：" & _
+         "1. 不要输出任何开场白、解释或总结。" & _
+         "2. 仅输出需要修改的地方。如果某条款无风险，不要输出。" & _
+         "3. 每一处修改严格遵循此格式：{REV}原文中的具体句子|修改后的更安全的句子" & _
+         "4. 重要：'原文中的具体句子'必须与合同内容一字不差，否则无法定位。" & _
+         "5. 如果建议删除某句，'修改后的更安全的句子'请留空或写[DELETE]。" & _
+         "待审查合同内容：" & docContent
+
+' 构建 JSON
+' 注意：EscapeJson 函数已修复，可以正确处理特殊字符
+Dim jsonBody As String
+jsonBody = "{""contents"": [{""parts"": [{""text"": """ & EscapeJson(prompt) & """}]}]}"
+
+' 发送请求
+Dim http As Object
+Set http = CreateObject("MSXML2.XMLHTTP")
+
+On Error GoTo ErrorHandler
+
+Application.StatusBar = "?? AI 正在思考并准备修订文档..."
+http.Open "POST", url, False
+http.setRequestHeader "Content-Type", "application/json"
+http.send jsonBody
+
+If http.Status = 200 Then
+    Dim responseText As String
+    responseText = http.responseText
+    
+    ' 提取 AI 回复
+    Dim aiRawText As String
+    aiRawText = ExtractContent(responseText)
+    
+    If aiRawText = "" Then
+        MsgBox "AI 认为文档完美无缺，或者未返回有效结果。", vbInformation
+        Exit Sub
+    End If
+    
+    ' ==========================================
+    ' 开启修订模式 (Track Changes)
+    ' ==========================================
+    Dim originalTrackStatus As Boolean
+    originalTrackStatus = ActiveDocument.TrackRevisions ' 记录当前状态
+    ActiveDocument.TrackRevisions = True ' 强制开启修订
+    
+    ' ==========================================
+    ' 解析并执行修订
+    ' ==========================================
+    Dim revArray() As String
+    revArray = Split(aiRawText, "{REV}")
+    
+    Dim i As Integer
+    Dim parts() As String
+    Dim originalText As String
+    Dim newText As String
+    Dim count As Integer
+    count = 0
+    
+    Application.ScreenUpdating = False
+    
+    For i = 1 To UBound(revArray)
+        parts = Split(revArray(i), "|")
+        
+        If UBound(parts) >= 1 Then
+            originalText = Trim(parts(0))
+            newText = Trim(parts(1))
+            
+            If newText = "[DELETE]" Then newText = ""
+            
+            If Len(originalText) > 3 Then
+                If FindAndRevise(originalText, newText) Then
+                    count = count + 1
+                End If
+            End If
+        End If
+    Next i
+    
+    Application.ScreenUpdating = True
+    Application.StatusBar = "? 修订完成！"
+    MsgBox "AI 修订完成！共执行了 " & count & " 处修改建议。", vbInformation
+    
+Else
+    ' 错误处理：输出详细的错误信息帮助调试
+    MsgBox "API 请求失败: " & http.Status & vbCrLf & _
+           "错误详情: " & http.responseText, vbCritical
+End If
+
+Set http = Nothing
+Exit Sub
+ErrorHandler:Application.ScreenUpdating = TrueMsgBox "运行出错: " & Err.Description, vbCriticalEnd Sub' ==========================================' 查找并以修订模式替换' ==========================================Function FindAndRevise(targetTxt As String, replacementTxt As String) As BooleanDim rng As RangeSet rng = ActiveDocument.ContentFindAndRevise = False
+
+With rng.Find
+    .ClearFormatting
+    .Replacement.ClearFormatting
+    .Text = targetTxt
+    .Forward = True
+    .Wrap = wdFindStop
+    .Format = False
+    .MatchCase = False
+    .MatchWholeWord = False
+    .IgnoreSpace = True
+End With
+
+If rng.Find.Execute Then
+    If rng.Text <> replacementTxt Then
+        rng.Text = replacementTxt
+        FindAndRevise = True
+    End If
+End If
+End Function' ==========================================' 修复后的 JSON 转义函数' ==========================================Function EscapeJson(ByVal txt As String) As String' 【重要修复】必须首先转义反斜杠，否则后续生成的反斜杠会被二次转义' 之前的代码这里写成了 Replace(txt, "", "\") 是错误的txt = Replace(txt, "", "\")' 然后转义双引号
+txt = Replace(txt, """", "\""")
+
+' 转义换行符和制表符
+txt = Replace(txt, vbCrLf, "\n") ' 优先处理 Windows 换行
+txt = Replace(txt, vbCr, "\n")
+txt = Replace(txt, vbLf, "\n")
+txt = Replace(txt, vbTab, "\t")
+txt = Replace(txt, Chr(12), "\f") ' 换页符
+txt = Replace(txt, Chr(8), "\b")  ' 退格符
+
+EscapeJson = txt
+End Function' ==========================================' 增强版内容清理函数' ==========================================Function CleanString(str As String) As StringDim s As Strings = str' 替换常见的换行和控制符为空格，保持文本连续性s = Replace(s, vbCrLf, " ")s = Replace(s, vbCr, " ")s = Replace(s, vbLf, " ")s = Replace(s, Chr(11), " ") ' 垂直制表符 (软回车)s = Replace(s, vbTab, " ")s = Replace(s, Chr(12), " ") ' 换页符' 简单去除多余空格
+Do While InStr(s, "  ") > 0
+    s = Replace(s, "  ", " ")
+Loop
+
+CleanString = Trim(s)
+End Function' ==========================================' JSON 响应提取函数' ==========================================Function ExtractContent(json As String) As StringDim startKey As StringstartKey = """text"": """Dim startPos As LongstartPos = InStr(json, startKey)If startPos > 0 Then
+    startPos = startPos + Len(startKey)
+    Dim i As Long
+    Dim char As String
+    Dim result As String
+    Dim slashCount As Integer
+    
+    result = ""
+    For i = startPos To Len(json)
+        char = Mid(json, i, 1)
+        
+        If char = "\" Then
+            slashCount = slashCount + 1
+        Else
+            ' 如果遇到引号，且之前的反斜杠数量是偶数（表示反斜杠被转义了，或者没有反斜杠）
+            ' 则是字符串结束的引号
+            If char = """" And (slashCount Mod 2 = 0) Then
+                Exit For
+            End If
+            slashCount = 0
+        End If
+        
+        result = result & char
+    Next i
+    
+    ' 反转义处理
+    result = Replace(result, "\n", vbCrLf)
+    result = Replace(result, "\""", """")
+    result = Replace(result, "\\", "\")
+    ExtractContent = result
+Else
+    ExtractContent = ""
+End If
+End Function
